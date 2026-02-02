@@ -1,0 +1,11 @@
+# Module 15: Trustworthy AI Explainer Dashboard
+# Requirements for both Gradio and Streamlit applications
+
+gradio
+openai
+langchain
+langchain-community
+sentence-transformers
+shap
+lime
+
