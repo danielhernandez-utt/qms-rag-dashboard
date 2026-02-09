@@ -8,11 +8,16 @@ import numpy as np
 # ------------------------------------------------------------
 # LOAD EMBEDDING MODEL ONCE
 # ------------------------------------------------------------
+
+# Load embedding model once for efficiency and consistency across queries
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+
 
 # ------------------------------------------------------------
 # LOAD PDF TEXT
 # ------------------------------------------------------------
+
+# Extract raw text from each page of the PDF
 def load_pdf_text(pdf_path: str) -> str:
     reader = PdfReader(pdf_path)
     text = ""
@@ -25,7 +30,9 @@ def load_pdf_text(pdf_path: str) -> str:
 # ------------------------------------------------------------
 # CHUNKING FUNCTION
 # ------------------------------------------------------------
-def chunk_text(text: str, chunk_size: int = 400):
+
+# Split text into manageable semantic chunks for retrieval
+def chunk_text(text: str, chunk_size: int = 250):
     words = text.split()
     chunks = []
     for i in range(0, len(words), chunk_size):
@@ -38,9 +45,10 @@ def chunk_text(text: str, chunk_size: int = 400):
 # ------------------------------------------------------------
 def build_knowledge_base(pdf_folder: str):
     """
-    Loads ALL PDFs inside `pdf_folder`, chunks them,
-    computes embeddings, and keeps track of the source procedure.
+    Builds a semantic knowledge base from multiple PDFs.
+    Implements the offline indexing stage of a RAG system.
     """
+
 
     all_chunks = []
     all_embeddings = []
@@ -81,19 +89,46 @@ def build_knowledge_base(pdf_folder: str):
 # ------------------------------------------------------------
 # RETRIEVE RELEVANT CHUNKS
 # ------------------------------------------------------------
-def retrieve_relevant_chunks(question: str, knowledge_base: dict, top_k: int = 3):
+
+def retrieve_relevant_chunks(question: str, knowledge_base: dict, top_k: int = 5):
     """
-    Returns a list of (chunk, source_pdf) pairs.
+    Semantic retrieval using cosine similarity.
+    This function implements the 'Retrieve' step of a RAG pipeline.
+    Returns a list of dicts with 'chunk', 'source', and 'score',
+    ensuring unique sources first.
     """
 
     q_emb = embedding_model.encode([question])
-
     sims = cosine_similarity(q_emb, knowledge_base["embeddings"])[0]
-
     top_indices = np.argsort(sims)[-top_k:][::-1]
 
+    # ------------------------------------------------------------
+    # HYBRID RETRIEVAL: document-code matching
+    # ------------------------------------------------------------
+    doc_code_matches = []
+    for i, chunk in enumerate(knowledge_base["chunks"]):
+        if ("P-" in chunk or "F-" in chunk or "IT-" in chunk or "D-" in chunk):
+            doc_code_matches.append(i)
+
+    # Merge indices
+    merged_indices = list(dict.fromkeys(list(top_indices) + doc_code_matches))
+
+    # ------------------------------------------------------------
+    # CRITICAL FIX: prioritize UNIQUE SOURCES
+    # ------------------------------------------------------------
+    seen_sources = set()
+    final_indices = []
+
+    for i in merged_indices:
+        src = knowledge_base["sources"][i]
+        if src not in seen_sources:
+            seen_sources.add(src)
+            final_indices.append(i)
+        if len(final_indices) == top_k:
+            break
+
     results = []
-    for i in top_indices:
+    for i in final_indices:
         results.append({
             "chunk": knowledge_base["chunks"][i],
             "source": knowledge_base["sources"][i],
