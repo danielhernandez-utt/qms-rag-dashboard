@@ -3,9 +3,10 @@
 
 streamlit
 groq
-sentence-transformers
-torch
 pypdf
+sentence-transformers
+scikit-learn
 pandas
 plotly
+numpy
 
