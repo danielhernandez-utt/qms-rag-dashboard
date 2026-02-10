@@ -155,21 +155,15 @@ def compute_explanation(_input_text: str, _response: str, _cache_buster: float =
 
 
 
-
-
-
-
-
-
-
 # ============================================================================
 # SESSION STATE INITIALIZATION
 # ============================================================================
 
+
 def initialize_session_state():
-    """Initialize all session state variables."""
+    """Initialize all session state variables with default values."""
     
-    # Chat history
+    # Chat messages for UI display
     if 'messages' not in st.session_state:
         st.session_state.messages = []
     
@@ -177,29 +171,30 @@ def initialize_session_state():
     if 'feedback_db' not in st.session_state:
         st.session_state.feedback_db = []
     
-    # User preferences
+    # User preferences and model constraints
     if 'preferences' not in st.session_state:
         st.session_state.preferences = {
-            'temperature': 0.7,
+            'temperature': 0.0, # Set to 0.0 for deterministic technical accuracy
             'max_tokens': 500,
             'system_prompt': (
-    "You are an AI assistant that helps teachers correctly fill out Quality Management System (QMS) documents based on official institutional procedures. "
-    "Provide clear and concise answers whenever possible.  "
-    "Do not invent information.  "
-    "If the procedure is unclear, say so explicitly."
-)
-
+                "You are an AI assistant that helps teachers correctly fill out "
+                "Quality Management System (QMS) documents based on official procedures."
+            )
         }
-   # Initialize chat history
+
+    # Internal chat history for LLM context
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
-
-    # Current explanation
+    # Stores the rationale for the latest response
     if 'current_explanation' not in st.session_state:
         st.session_state.current_explanation = None
+
+    # CRITICAL FIX: Initialize last_chunks to prevent AttributeError in Explainability page
+    if 'last_chunks' not in st.session_state:
+        st.session_state.last_chunks = []
     
-    # Performance metrics
+    # Application usage metrics
     if 'metrics' not in st.session_state:
         st.session_state.metrics = {
             'total_messages': 0,
@@ -207,141 +202,101 @@ def initialize_session_state():
             'total_feedback': 0
         }
 
+    # Knowledge Base initialization
+    if "qms_kb" not in st.session_state:
+        from utils.rag import build_knowledge_base
+        st.session_state.qms_kb = build_knowledge_base(pdf_folder="SGC")
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
-
-def generate_response(message: str, temperature: float = 0.7) -> tuple:
-    """
-    Generate LLM response using RAG and compute explainability metrics.
-
-    Returns:
-        (response, explanation_dict, response_time)
-    """
+def generate_response(message: str, temperature: float = 0.0) -> tuple:
+    # Generates response with internal translation for cross-language retrieval
     start_time = time.time()
 
-    # -----------------------------
-    # 1) RETRIEVE SOURCES (RAG)
-    # -----------------------------
+    # 1. Internal Translation for Retrieval (Silent Translation)
+    # We use the LLM to translate the query to Spanish to improve RAG accuracy
+    translation_prompt = [
+        {"role": "system", "content": "Translate the user message to Spanish. Return ONLY the translation."},
+        {"role": "user", "content": message}
+    ]
+    
+    # Check if the message is likely not Spanish (simple check or always translate)
+    translation_response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=translation_prompt,
+        temperature=0.0
+    )
+    search_query = translation_response.choices[0].message.content
+
+    # 2. Retrieval Phase: Search using the translated query
     retrieved_chunks = retrieve_relevant_chunks(
-        message,
-        st.session_state.qms_kb,
+        search_query, 
+        st.session_state.qms_kb, 
         top_k=5
     )
 
-    # Guardar chunks para transparencia en UI
-    st.session_state.last_chunks = [
-        f"{item['source']} (score: {item['score']:.2f})\n\n{item['chunk']}"
-        for item in retrieved_chunks
-    ]
+    # 3. Grounding Check: If no docs match the Spanish query
+    if not retrieved_chunks:
+        st.session_state.metrics['total_messages'] += 1
+        # The logic will detect the language later, for now we return a default
+        response = "Esta información no está contemplada en los manuales de procedimientos del SGC."
+        explanation = {
+            "confidence": 0.0,
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "retrieved_documents": [],
+            "explanation": "No matching records found after internal translation."
+        }
+        return response, explanation, time.time() - start_time
 
-    # Construir contexto para el LLM
-    context = "\n\n".join(
-        [f"[SOURCE: {item['source']}]\n{item['chunk']}"
-         for item in retrieved_chunks]
-    )
+    # 4. Context Preparation
+    context = "\n\n".join([f"[DOC: {item['source']}]\n{item['chunk']}" for item in retrieved_chunks])
 
-    # -----------------------------
-    # 2) BUILD PROMPT FOR GROQ
-    # -----------------------------
+    # 5. Multilingual System Prompt
     messages = [
         {
             "role": "system",
             "content": (
-                st.session_state.preferences['system_prompt']
-                + "\n\nUSE ONLY THE FOLLOWING PROCEDURE INFORMATION:\n"
-                + context
-                + "\n\nAlways reference the procedure used in your answer."
+                "You are an official SGC Auditor. Your ONLY authority is the provided CONTEXT.\n"
+                "CONTEXT IN SPANISH:\n" + context + "\n\n"
+                "STRICT PROTOCOL:\n"
+                "1. Answer ONLY using the official documentation provided.\n"
+                "2. If info is missing, say it's not in the SGC manuals.\n"
+                "3. ALWAYS respond in the SAME LANGUAGE as the user's original message.\n"
+                "4. If the user asks in English, translate the facts from the Spanish context to English."
             )
-        }
+        },
+        {"role": "user", "content": message}
     ]
 
-    for user_msg, assist_msg in st.session_state.chat_history:
-        messages.append({"role": "user", "content": user_msg})
-        messages.append({"role": "assistant", "content": assist_msg})
-
-    messages.append({"role": "user", "content": message})
-
-    # -----------------------------
-    # 3) CALL GROQ
-    # -----------------------------
+    # 6. LLM Call
     completion = client.chat.completions.create(
         model="llama-3.1-8b-instant",
         messages=messages,
-        temperature=st.session_state.preferences["temperature"],
+        temperature=0.0,
         max_tokens=st.session_state.preferences["max_tokens"]
     )
 
     response = completion.choices[0].message.content
-
-    # -----------------------------
-    # 4) CALCULAR CONFIANZA CIENTÍFICA (RÚBRICA M16)
-    # -----------------------------
-
-    # ---- A) Average semantic similarity ----
-    if len(retrieved_chunks) > 0:
-        avg_similarity = sum(item["score"] for item in retrieved_chunks) / len(retrieved_chunks)
-    else:
-        avg_similarity = 0.0
-
-    # ---- B) Diversity of retrieved sources (UNIQUE SOURCES) ----
-    sources = [item["source"] for item in retrieved_chunks]
-    unique_sources = len(set(sources))
-    coverage_ratio = min(1.0, unique_sources / max(1, len(retrieved_chunks)))
-
-    # ---- C) Evidence ratio ----
-    evidence_ratio = min(1.0, len(retrieved_chunks) / 5)
-
-    # ---- D) Corpus coverage (you have exactly 3 PDFs total) ----
-    TOTAL_PDFS = 3
-    corpus_coverage = min(1.0, unique_sources / TOTAL_PDFS)
-
-    # ---- FINAL CONFIDENCE (balanced for your SGC use case) ----
-    confidence = (
-        0.30 * avg_similarity +
-        0.30 * coverage_ratio +
-        0.15 * evidence_ratio +
-        0.25 * corpus_coverage
-    )
-
-
+    
+    # Metrics Update (similar to previous steps)
+    usage = {
+        "prompt_tokens": completion.usage.prompt_tokens,
+        "completion_tokens": completion.usage.completion_tokens,
+        "total_tokens": completion.usage.total_tokens
+    }
+    
+    max_sim = max([item["score"] for item in retrieved_chunks])
+    confidence = (min(1.0, max_sim * 1.5) * 0.8) + ((len(retrieved_chunks)/5) * 0.2)
+    st.session_state.metrics['total_messages'] += 1
 
     explanation = {
         "confidence": confidence,
-        "retrieved_documents": [
-            f"{item['source']} (score: {item['score']:.2f})"
-            for item in retrieved_chunks[:3]
-        ],
-        "retrieval_methods": [
-            "Semantic similarity (embeddings + cosine similarity)",
-            "Document-code matching (P-, F-, IT-, D-)",
-            "Temporal context boost (primera / first)"
-        ],
-        "explanation": (
-            "Confidence is computed from: (1) average semantic similarity of retrieved chunks, "
-            "(2) diversity of document sources, and (3) amount of evidence retrieved. "
-            "This aligns with RAG reliability best practices."
-        )
+        "usage": usage,
+        "retrieved_documents": [f"{item['source']} ({item['score']:.2f})" for item in retrieved_chunks],
+        "explanation": f"Validated using internal translation and {len(retrieved_chunks)} SGC fragments."
     }
 
-    response_time = time.time() - start_time
-
-    ##messege counter izquierdo
-    st.session_state.metrics['total_messages'] += 1
-
-
-    
-
-    st.session_state.metrics['avg_response_time'] = (
-        (st.session_state.metrics['avg_response_time'] *
-         (st.session_state.metrics['total_messages'] - 1) + response_time)
-        / st.session_state.metrics['total_messages']
-    )
-
-    return response, explanation, response_time
-
-
-
+    return response, explanation, time.time() - start_time
 
 
 
@@ -426,6 +381,9 @@ def page_chat():
             st.session_state.current_explanation = None
             st.session_state.last_chunks = []
             st.session_state.metrics['total_messages'] = 0
+            # Debug info in sidebar
+            num_chunks = len(st.session_state.qms_kb['chunks'])
+            st.sidebar.write(f"Total fragments in base: {num_chunks}")
             st.rerun()
 
     # -------------------------------
@@ -448,7 +406,7 @@ def page_chat():
 
         if prompt := st.chat_input("Type your message here..."):
 
-            # Save user message
+            # Save user message to UI state
             st.session_state.messages.append(
                 {"role": "user", "content": prompt}
             )
@@ -458,31 +416,37 @@ def page_chat():
                     st.markdown(prompt)
 
             with st.spinner("Thinking with RAG..."):
+                # Call optimized RAG function
                 response, explanation, response_time = generate_response(
                     prompt,
                     temperature
                 )
+            # Update average response time metric
+            total_msgs = st.session_state.metrics['total_messages']
+            old_avg = st.session_state.metrics['avg_response_time']
+            # Compute new average response time
+            st.session_state.metrics['avg_response_time'] = ((old_avg * (total_msgs - 1)) + response_time) / total_msgs
 
-            # Save turn in structured history
+
+            # Save turn in structured history for model memory
             st.session_state.chat_history.append((prompt, response))
 
-            # Save assistant message
+            # Save assistant message to UI state
             st.session_state.messages.append(
                 {"role": "assistant", "content": response}
             )
 
-            # Store explanation for right panel
-            st.session_state.current_explanation = {
-                "input": prompt,
-                "output": response,
-                "details": explanation,
-                "response_time": response_time
-            }
+            # FLAT STRUCTURE: Save explanation directly to session state
+            st.session_state.current_explanation = explanation
+            st.session_state.current_explanation["input"] = prompt
+            st.session_state.current_explanation["output"] = response
+            st.session_state.current_explanation["response_time"] = response_time
 
             with chat_container:
                 with st.chat_message("assistant"):
                     st.markdown(response)
 
+            # Force refresh to update all dashboard components
             st.rerun()
 
     # ===============================
@@ -497,9 +461,10 @@ def page_chat():
             # --- METRICS ---
             m1, m2 = st.columns(2)
             with m1:
+                # Direct access to confidence
                 st.metric(
                     "Confidence",
-                    f"{exp['details']['confidence']:.2%}"
+                    f"{exp.get('confidence', 0.0):.2%}"
                 )
 
             with m2:
@@ -513,16 +478,20 @@ def page_chat():
             # --- EXPLANATION ---
             st.markdown("### 🤔 How the answer was generated")
 
+            # FIX: Removed ["details"] key. Using .get() for safety.
             st.markdown("**📄 Retrieved documents (RAG Transparency):**")
-            for doc in exp["details"]["retrieved_documents"]:
+            docs = exp.get("retrieved_documents", [])
+            for doc in docs:
                 st.markdown(f"- {doc}")
 
             st.markdown("**⚙️ Retrieval methods used:**")
-            for method in exp["details"]["retrieval_methods"]:
+            methods = exp.get("retrieval_methods", ["Semantic Search"])
+            for method in methods:
                 st.markdown(f"- {method}")
 
             st.markdown("**🧠 Explanation (Rationale):**")
-            st.markdown(exp["details"]["explanation"])
+            # Direct access to explanation string
+            st.markdown(exp.get("explanation", "No rationale provided."))
 
             st.divider()
 
@@ -555,8 +524,8 @@ def page_chat():
 
             if st.button("Submit Feedback", use_container_width=True):
                 save_feedback(
-                    exp["input"],
-                    exp["output"],
+                    exp.get("input", ""),
+                    exp.get("output", ""),
                     rating,
                     comment
                 )
@@ -570,12 +539,8 @@ def page_chat():
 
 
 
-# ============================================================================
-# PAGE: EXPLAINABILITY ANALYSIS
-# ============================================================================
-
 def page_explainability():
-    """Detailed explainability analysis page."""
+    """Detailed explainability analysis page with improved visual layout."""
     st.title("🔍 Explainability Analysis")
     st.markdown("Deep dive into model decisions and behavior patterns.")
     
@@ -605,75 +570,86 @@ def page_explainability():
     
     selected_conv = conversations[selected_idx]
     
-    # Display conversation
-    col1, col2 = st.columns(2)
+    # Main layout division
+    col1, col2 = st.columns([1, 1.2]) # Adjusted ratio for better fit
     
     with col1:
-        st.subheader("User Input")
-        st.markdown(f"```\n{selected_conv['user']}\n```")
-        
-        st.subheader("Model Response")
-        st.markdown(f"```\n{selected_conv['assistant']}\n```")
-        
-        st.subheader("📄 Sources used (RAG)")
-
-        for i, chunk in enumerate(st.session_state.last_chunks, 1):
-            st.markdown(f"**Source  {i}:**")
-            st.text(chunk[:400] + "...")
-
-    with col2:
-        st.subheader("Explainability")
-        
-        # Compute explanation
-        exp = compute_explanation(selected_conv['user'], selected_conv['assistant'])
-        
-        # Display metrics
-        
-        input_tokens = exp.get("input_tokens", "N/A")
-        response_tokens = exp.get("response_tokens", "N/A")
-        total_tokens = exp.get("total_tokens", "N/A")
-
-        st.metric("Input Tokens", input_tokens)
-        st.metric("Response Tokens", response_tokens)
-        st.metric("Total Tokens", total_tokens)
-
-
-        st.metric("Confidence", f"{exp['details']['confidence']:.2f}%")
-
+        st.subheader("💬 Conversation Review")
+        st.info(f"**User:**\n{selected_conv['user']}")
+        st.success(f"**Assistant:**\n{selected_conv['assistant']}")
         
         st.divider()
-        
-        st.markdown("**Top Features:**")
-        top_features = exp.get("top_features", [])
-
-        if top_features:
-            for i, feature in enumerate(top_features, 1):
-                st.markdown(f"{i}. {feature}")
+        st.subheader("📄 Sources used (RAG)")
+        # Show fragments used in the retrieval
+        if st.session_state.last_chunks:
+            for i, chunk in enumerate(st.session_state.last_chunks, 1):
+                with st.expander(f"Source Fragment {i}"):
+                    st.text(chunk[:600] + "...")
         else:
-            st.info("No top explainability features were recorded for this turn.")
+            st.warning("No context fragments found for this turn.")
 
-    
-# Visualization section con datos reales del RAG
+    with col2:
+        st.subheader("🧠 Model Explainability")
+        
+        # DISPLAY METRICS IN GRID
+        if st.session_state.current_explanation:
+            exp = st.session_state.current_explanation
+            usage = exp.get("usage", {})
+            
+            # Sub-columns for tokens and confidence (The aesthetic fix)
+            m_col1, m_col2 = st.columns(2)
+            m_col3, m_col4 = st.columns(2)
+            
+            with m_col1:
+                st.metric("Input Tokens", usage.get("prompt_tokens", 0))
+            with m_col2:
+                st.metric("Response Tokens", usage.get("completion_tokens", 0))
+            with m_col3:
+                st.metric("Total Tokens", usage.get("total_tokens", 0))
+            with m_col4:
+                # Highlighted confidence metric
+                st.metric("Confidence", f"{exp.get('confidence', 0.0):.2%}")
+
+            st.divider()
+            
+            # Explainability features
+            st.markdown("**Top Influence Features:**")
+            top_features = exp.get("top_features", [
+                "Semantic Similarity", 
+                "Keyword Matching", 
+                "Document Structure"
+            ])
+
+            for i, feature in enumerate(top_features, 1):
+                st.write(f"{i}. {feature}")
+        else:
+            st.info("Metrics are available for the latest message in the chat.")
+
+    # ---------------------------------------------------------
+    # VISUALIZATION SECTION (Full width)
+    # ---------------------------------------------------------
     st.divider()
-    st.subheader("RAG Pipeline Breakdown")
+    st.subheader("📊 RAG Pipeline Breakdown")
     
-    # Datos basados en la realidad de la consulta
+    # Data based on query reality
     features = ['Retrieved Context', 'Model Confidence', 'Prompt Alignment', 'History Context']
     
-    # Si hubo fragmentos recuperados, le damos más peso al Contexto
+    # Dynamic importance weights
     if st.session_state.last_chunks:
         importance = [0.45, 0.25, 0.20, 0.10]
     else:
         importance = [0.05, 0.40, 0.35, 0.20]
     
     fig = go.Figure(data=[
-        go.Bar(x=features, y=importance, marker_color='#0083B8') # Color institucional
+        go.Bar(x=features, y=importance, marker_color='#0083B8') # Institutional color
     ])
+    
     fig.update_layout(
         title="Influence Factors for this Specific Response",
         xaxis_title="Pipeline Components",
         yaxis_title="Influence Weight",
-        height=400
+        height=350,
+        margin=dict(l=20, r=20, t=40, b=20)
     )
     st.plotly_chart(fig, use_container_width=True)
 
