@@ -1,5 +1,5 @@
 """
-Trustworthy AI Explainer - Streamlit Dashboard
+RAG-based Academic QA Assistant using SGC documents. - Streamlit Dashboard
 Module 15 Team Project Template
 
 This template provides a working Streamlit application with:
@@ -13,6 +13,7 @@ This template provides a working Streamlit application with:
 Team: Customize this template for your specific use case
 """
 
+from lime import explanation
 import streamlit as st
 import os
 import time
@@ -23,6 +24,13 @@ from typing import List, Dict, Optional
 from datetime import datetime
 
 from utils.rag import build_knowledge_base, retrieve_relevant_chunks
+from utils.qa_pipeline import run_qa_pipeline
+from utils.explainability import explain_similarity
+
+from utils.rag import get_embedding_model
+embedding_model = get_embedding_model()
+
+
 
 
 # ============================================================================
@@ -30,7 +38,7 @@ from utils.rag import build_knowledge_base, retrieve_relevant_chunks
 # ============================================================================
 
 st.set_page_config(
-    page_title="Trustworthy AI Explainer - QMS Assistant",
+    page_title="Trustworthy RAG – SGC",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -52,19 +60,22 @@ if "feedback_data" not in st.session_state:
 if "qms_kb" not in st.session_state:
     st.session_state.qms_kb = build_knowledge_base(pdf_folder="SGC")
 
+if "current_explanation" not in st.session_state:
+    st.session_state.current_explanation = {}
 
 
 
 
-st.title("Trustworthy AI Explainer – QMS Assistant")
 
-st.markdown(
-    """
-    **RAG-based Academic QA Assistant using SGC documents.**  
-    This system retrieves relevant fragments from official academic procedures
-    before generating an answer.
-    """
-)
+#st.title("RAG-based Academic QA Assistant – SGC Documents")
+
+#st.markdown(
+#    """
+#    **RAG-based Academic QA Assistant using SGC documents.**  
+#    This system retrieves relevant fragments from official academic procedures
+#    before generating an answer.
+#    """
+#)
 
 # ============================================================================
 # LLM AND EMBEDDING MODEL LOADING
@@ -118,20 +129,20 @@ def load_feedback_data() -> pd.DataFrame:
 
 @st.cache_data
 def compute_explanation(_input_text: str, _response: str, _cache_buster: float = 0.0) -> dict:
+
     retrieved = st.session_state.get("last_chunks", [])
     num_chunks = len(retrieved)
 
     # ======== CONFIDENCE (M16 RUBRIC-ALIGNED) ========
     if num_chunks >= 3:
-        confidence = 0.92      # 92%
+        confidence = 0.92
     elif num_chunks == 2:
-        confidence = 0.80      # 80%
+        confidence = 0.80
     elif num_chunks == 1:
-        confidence = 0.65      # 65%
+        confidence = 0.65
     else:
-        confidence = 0.50      # 50%
+        confidence = 0.50
 
-    # Documentos únicos recuperados
     retrieved_docs = list({c.split("\n")[0] for c in retrieved})
 
     retrieval_methods = [
@@ -141,17 +152,12 @@ def compute_explanation(_input_text: str, _response: str, _cache_buster: float =
     ]
 
     return {
-        "details": {
-            "confidence": confidence,
-            "retrieved_documents": retrieved_docs,
-            "retrieval_methods": retrieval_methods,
-            "explanation": (
-                f"The model relied on {num_chunks} official SGC fragments. "
-                f"The confidence score reflects both the number of retrieved "
-                f"sources and their semantic alignment with the question."
-            )
-        }
+        "confidence": confidence,
+        "retrieved_documents": retrieved_docs,
+        "retrieval_methods": retrieval_methods,
+        "num_chunks": num_chunks
     }
+
 
 
 
@@ -210,93 +216,76 @@ def initialize_session_state():
 # HELPER FUNCTIONS
 # ============================================================================
 def generate_response(message: str, temperature: float = 0.0) -> tuple:
-    # Generates response with internal translation for cross-language retrieval
+
     start_time = time.time()
 
-    # 1. Internal Translation for Retrieval (Silent Translation)
-    # We use the LLM to translate the query to Spanish to improve RAG accuracy
-    translation_prompt = [
-        {"role": "system", "content": "Translate the user message to Spanish. Return ONLY the translation."},
-        {"role": "user", "content": message}
-    ]
-    
-    # Check if the message is likely not Spanish (simple check or always translate)
-    translation_response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=translation_prompt,
-        temperature=0.0
-    )
-    search_query = translation_response.choices[0].message.content
-
-    # 2. Retrieval Phase: Search using the translated query
-    retrieved_chunks = retrieve_relevant_chunks(
-        search_query, 
-        st.session_state.qms_kb, 
+    result = run_qa_pipeline(
+        question=message,
+        knowledge_base=st.session_state.qms_kb,
+        llm_client=client,
+        model_name="llama-3.1-8b-instant",
         top_k=5
     )
 
-    # 3. Grounding Check: If no docs match the Spanish query
-    if not retrieved_chunks:
-        st.session_state.metrics['total_messages'] += 1
-        # The logic will detect the language later, for now we return a default
-        response = "Esta información no está contemplada en los manuales de procedimientos del SGC."
-        explanation = {
-            "confidence": 0.0,
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-            "retrieved_documents": [],
-            "explanation": "No matching records found after internal translation."
-        }
-        return response, explanation, time.time() - start_time
+    response_time = time.time() - start_time
 
-    # 4. Context Preparation
-    context = "\n\n".join([f"[DOC: {item['source']}]\n{item['chunk']}" for item in retrieved_chunks])
+    response = result["answer"]
+    retrieved_chunks = result.get("retrieved_chunks", [])
+    metadata = result.get("metadata", {})
+    usage = result.get("usage", {})
 
-    # 5. Multilingual System Prompt
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are an official SGC Auditor. Your ONLY authority is the provided CONTEXT.\n"
-                "CONTEXT IN SPANISH:\n" + context + "\n\n"
-                "STRICT PROTOCOL:\n"
-                "1. Answer ONLY using the official documentation provided.\n"
-                "2. If info is missing, say it's not in the SGC manuals.\n"
-                "3. ALWAYS respond in the SAME LANGUAGE as the user's original message.\n"
-                "4. If the user asks in English, translate the facts from the Spanish context to English."
-            )
-        },
-        {"role": "user", "content": message}
-    ]
+    groundedness = metadata.get("groundedness", 0.0)
+    max_similarity = metadata.get("max_similarity", 0.0)
+    avg_similarity = metadata.get("avg_similarity", 0.0)
+    retrieval_depth = metadata.get("num_chunks_used", 0)
 
-    # 6. LLM Call
-    completion = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=messages,
-        temperature=0.0,
-        max_tokens=st.session_state.preferences["max_tokens"]
-    )
-
-    response = completion.choices[0].message.content
-    
-    # Metrics Update (similar to previous steps)
-    usage = {
-        "prompt_tokens": completion.usage.prompt_tokens,
-        "completion_tokens": completion.usage.completion_tokens,
-        "total_tokens": completion.usage.total_tokens
-    }
-    
-    max_sim = max([item["score"] for item in retrieved_chunks])
-    confidence = (min(1.0, max_sim * 1.5) * 0.8) + ((len(retrieved_chunks)/5) * 0.2)
-    st.session_state.metrics['total_messages'] += 1
+    # Confidence calculation
+    if retrieved_chunks:
+        confidence = (
+            0.6 * groundedness +
+            0.3 * max_similarity +
+            0.1 * (retrieval_depth / 5)
+        )
+    else:
+        confidence = 0.0
 
     explanation = {
         "confidence": confidence,
         "usage": usage,
-        "retrieved_documents": [f"{item['source']} ({item['score']:.2f})" for item in retrieved_chunks],
-        "explanation": f"Validated using internal translation and {len(retrieved_chunks)} SGC fragments."
+        "groundedness": groundedness,
+        "max_similarity": max_similarity,
+        "avg_similarity": avg_similarity,
+        "retrieval_depth": retrieval_depth,
+        "retrieval_methods": ["Semantic Search"],
+        "explanation": (
+            f"The system retrieved {retrieval_depth} semantically "
+            f"similar document fragments from the official SGC knowledge base. "
+            "The answer was generated strictly based on those sources "
+            "without introducing external information."
+        ),
+        "response_time": response_time
     }
 
-    return response, explanation, time.time() - start_time
+    # Save for later rendering
+    st.session_state.last_chunks = retrieved_chunks
+    st.session_state.last_user_question = message
+    if "explanations_history" not in st.session_state:
+        st.session_state.explanations_history = []
+
+    if "chunks_history" not in st.session_state:
+        st.session_state.chunks_history = []
+
+    st.session_state.explanations_history.append(explanation)
+    st.session_state.chunks_history.append(retrieved_chunks)
+
+
+    return response, explanation, response_time
+
+
+
+
+
+
 
 
 
@@ -324,19 +313,20 @@ def save_feedback(message: str, response: str, rating: str, comment: str):
 def page_chat():
     """Main chat interface page with RAG transparency and explainability."""
 
-    st.title("🤖 Trustworthy RAG Assistant — QMS")
-    st.markdown("Procedure: Multi-document SGC (RAG-based)")
-
+    st.title("🤖 RAG-based Academic QA Assistant – SGC Documents")
     st.markdown(
         """
-        This assistant answers **ONLY** based on official institutional procedures  
-        stored in the Quality Management System (SGC).  
+        This assistant answers **ONLY based on official Quality Management System (SGC) procedures.**
 
-        It uses:
-        - Retrieval-Augmented Generation (RAG)
-        - Source transparency (expandable documents)
-        - Explainability metrics
-        - User feedback collection
+        How it works:
+        1) Retrieves relevant official PDF documents.
+        2) Selects the most relevant fragments.
+        3) Generates an answer grounded exclusively in those sources.
+        4) Displays sources and reasoning in the Explainability panel.
+
+        Important:
+        - The system does not invent information.
+        - If a procedure is unclear or incomplete, it will state this explicitly.
         """
     )
 
@@ -397,7 +387,7 @@ def page_chat():
     with col1:
         st.subheader("Conversation")
 
-        chat_container = st.container(height=400)
+        chat_container = st.container(height=300)
 
         with chat_container:
             for msg in st.session_state.messages:
@@ -421,11 +411,18 @@ def page_chat():
                     prompt,
                     temperature
                 )
-            # Update average response time metric
+            # Increment total messages FIRST
+            st.session_state.metrics['total_messages'] += 1
+
             total_msgs = st.session_state.metrics['total_messages']
             old_avg = st.session_state.metrics['avg_response_time']
-            # Compute new average response time
-            st.session_state.metrics['avg_response_time'] = ((old_avg * (total_msgs - 1)) + response_time) / total_msgs
+
+            st.session_state.metrics['avg_response_time'] = (
+                old_avg + (response_time - old_avg) / total_msgs
+            )
+
+    
+
 
 
             # Save turn in structured history for model memory
@@ -476,36 +473,116 @@ def page_chat():
             st.divider()
 
             # --- EXPLANATION ---
-            st.markdown("### 🤔 How the answer was generated")
+        st.markdown("### 🤔 How the answer was generated")
 
-            # FIX: Removed ["details"] key. Using .get() for safety.
-            st.markdown("**📄 Retrieved documents (RAG Transparency):**")
-            docs = exp.get("retrieved_documents", [])
+        # FIX: Removed ["details"] key. Using .get() for safety.
+        st.markdown("**📄 Retrieved documents (Top Matches):**")
+
+        docs = st.session_state.get("last_chunks", [])
+
+        if docs:
             for doc in docs:
-                st.markdown(f"- {doc}")
+                source = doc.get("source", "Unknown")
+                score = doc.get("score", 0.0)
+                st.markdown(f"- {source} (Similarity: {score:.2f})")
+        else:
+            st.info("No documents retrieved.")
 
-            st.markdown("**⚙️ Retrieval methods used:**")
-            methods = exp.get("retrieval_methods", ["Semantic Search"])
-            for method in methods:
-                st.markdown(f"- {method}")
 
-            st.markdown("**🧠 Explanation (Rationale):**")
-            # Direct access to explanation string
-            st.markdown(exp.get("explanation", "No rationale provided."))
+
+        st.markdown("**⚙️ Retrieval methods used:**")
+        exp = st.session_state.get("current_explanation", {}) or {}
+
+        methods = exp.get("retrieval_methods", ["Semantic Search"])
+        for method in methods:
+            st.markdown(f"- {method}")
+
+        st.markdown("**🧠 Explanation (Rationale):**")
+        # Direct access to explanation string
+        st.markdown(exp.get("explanation", "No rationale provided."))
+
+        st.divider()
+
+        # --- RETRIEVED SOURCES (RAG TRANSPARENCY) ---
+        st.subheader("📄 Retrieved Sources (RAG Transparency)")
+
+        if "last_chunks" in st.session_state and len(st.session_state.last_chunks) > 0:
+
+            for i, chunk in enumerate(st.session_state.last_chunks, 1):
+
+                with st.expander(
+                    f"Source {i} — {chunk['source']} ({chunk['score']:.2f})"
+                ):
+                    st.write(chunk["chunk"])
+
+        else:
+            st.info("No relevant sources were retrieved for this query.")
+
+        #st.caption(f"Similarity score: {chunk['score']:.3f}")
+        # --- LIME LOCAL EXPLAINABILITY ---
+        if (
+            "last_chunks" in st.session_state
+            and len(st.session_state.last_chunks) > 0
+            and "last_user_question" in st.session_state
+        ):
+
+            from utils.explainability import explain_similarity
+            import pandas as pd
+            import plotly.express as px
 
             st.divider()
+            st.subheader("🧠 Local Explainability (LIME)")
 
-            # --- RETRIEVED SOURCES (RAG TRANSPARENCY) ---
-            st.subheader("📄 Retrieved Sources (RAG Transparency)")
+            top_doc = st.session_state.last_chunks[0]["chunk"]
 
-            if "last_chunks" in st.session_state and len(st.session_state.last_chunks) > 0:
-                for i, chunk in enumerate(st.session_state.last_chunks, 1):
-                    with st.expander(f"Source {i}"):
-                        st.text(chunk)
+            lime_explanation = explain_similarity(
+                st.session_state.last_user_question,
+                top_doc,
+                embedding_model
+            )
+
+            if lime_explanation is not None:
+
+                explanation_list = lime_explanation.as_list()
+
+                df = pd.DataFrame(explanation_list, columns=["Term", "Weight"])
+
+                # Sort by absolute contribution
+                df = df.reindex(df["Weight"].abs().sort_values().index)
+
+                df["Impact"] = df["Weight"].apply(
+                    lambda x: "Increases Similarity" if x > 0 else "Decreases Similarity"
+                )
+
+                fig = px.bar(
+                    df,
+                    x="Weight",
+                    y="Term",
+                    orientation="h",
+                    color="Impact",
+                    color_discrete_map={
+                        "Increases Similarity": "#2ca02c",
+                        "Decreases Similarity": "#d62728"
+                    },
+                    title="LIME Feature Contribution to Semantic Similarity"
+                )
+
+                fig.update_layout(
+                    height=400,
+                    yaxis_title="",
+                    xaxis_title="Contribution Weight"
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                st.caption(
+                    "Green terms increase semantic similarity between the question "
+                    "and the top retrieved document. Red terms decrease similarity."
+                )
+
             else:
-                st.info("No relevant sources were retrieved for this query.")
+                st.warning("LIME explanation could not be generated.")
 
-            st.divider()
 
             # --- FEEDBACK ---
             st.markdown("### 📝 Provide Feedback")
@@ -540,118 +617,146 @@ def page_chat():
 
 
 def page_explainability():
-    """Detailed explainability analysis page with improved visual layout."""
+    """Detailed explainability analysis page aligned with RAG architecture."""
+
     st.title("🔍 Explainability Analysis")
     st.markdown("Deep dive into model decisions and behavior patterns.")
-    
+
     if not st.session_state.messages:
         st.info("No conversations yet. Go to the Chat page to start.")
         return
-    
-    # Get recent conversations
+
+    # Build conversation pairs
     conversations = []
     for i in range(0, len(st.session_state.messages), 2):
-        if i+1 < len(st.session_state.messages):
+        if i + 1 < len(st.session_state.messages):
             conversations.append({
-                'user': st.session_state.messages[i]['content'],
-                'assistant': st.session_state.messages[i+1]['content']
+                "user": st.session_state.messages[i]["content"],
+                "assistant": st.session_state.messages[i + 1]["content"]
             })
-    
+
     if not conversations:
         st.warning("No complete conversations found.")
         return
-    
-    # Select conversation to analyze
+
     selected_idx = st.selectbox(
         "Select conversation to analyze:",
         range(len(conversations)),
         format_func=lambda i: f"Conv {i+1}: {conversations[i]['user'][:50]}..."
     )
-    
+
     selected_conv = conversations[selected_idx]
-    
-    # Main layout division
-    col1, col2 = st.columns([1, 1.2]) # Adjusted ratio for better fit
-    
+
+    col1, col2 = st.columns([1, 1.2])
+
+    # ===============================
+    # LEFT COLUMN — Conversation + Sources
+    # ===============================
     with col1:
         st.subheader("💬 Conversation Review")
         st.info(f"**User:**\n{selected_conv['user']}")
         st.success(f"**Assistant:**\n{selected_conv['assistant']}")
-        
+
         st.divider()
-        st.subheader("📄 Sources used (RAG)")
-        # Show fragments used in the retrieval
-        if st.session_state.last_chunks:
-            for i, chunk in enumerate(st.session_state.last_chunks, 1):
-                with st.expander(f"Source Fragment {i}"):
-                    st.text(chunk[:600] + "...")
+        st.subheader("📄 Retrieved Source Fragments")
+
+        chunks = st.session_state.get("last_chunks", [])
+
+        if chunks:
+            for i, chunk in enumerate(chunks, 1):
+                source = chunk.get("source", "Unknown")
+                score = chunk.get("score", 0.0)
+                text_content = chunk.get("chunk", "")
+
+                with st.expander(f"{source} (Similarity: {score:.2f})"):
+                    preview = text_content[:800]
+                    st.text(preview + "..." if len(text_content) > 800 else preview)
         else:
             st.warning("No context fragments found for this turn.")
 
+    # ===============================
+    # RIGHT COLUMN — Metrics
+    # ===============================
     with col2:
-        st.subheader("🧠 Model Explainability")
-        
-        # DISPLAY METRICS IN GRID
-        if st.session_state.current_explanation:
-            exp = st.session_state.current_explanation
-            usage = exp.get("usage", {})
-            
-            # Sub-columns for tokens and confidence (The aesthetic fix)
-            m_col1, m_col2 = st.columns(2)
-            m_col3, m_col4 = st.columns(2)
-            
-            with m_col1:
-                st.metric("Input Tokens", usage.get("prompt_tokens", 0))
-            with m_col2:
-                st.metric("Response Tokens", usage.get("completion_tokens", 0))
-            with m_col3:
-                st.metric("Total Tokens", usage.get("total_tokens", 0))
-            with m_col4:
-                # Highlighted confidence metric
+        st.subheader("🧠 Model Metrics")
+
+        exp = st.session_state.get("current_explanation", None)
+        chunks_history = st.session_state.get("chunks_history", [])
+        explanations_history = st.session_state.get("explanations_history", [])
+
+        if selected_idx < len(chunks_history):
+            chunks = chunks_history[selected_idx]
+        else:
+            chunks = []
+
+        if selected_idx < len(explanations_history):
+            exp = explanations_history[selected_idx]
+        else:
+            exp = None
+
+        if exp:
+
+            m1, m2 = st.columns(2)
+            m3, m4 = st.columns(2)
+            m5, m6 = st.columns(2)
+            #m7, m8 = st.columns(2)
+            with m1:
                 st.metric("Confidence", f"{exp.get('confidence', 0.0):.2%}")
 
-            st.divider()
+            with m2:
+                st.metric("Retrieved Chunks", len(chunks))
+
+            with m3:
+                st.metric("Retrieval Method", "Semantic Search")
+
+            with m4:
+                st.metric("Response Length", len(selected_conv["assistant"]))
+
+            with m5:
+                st.metric("Groundedness", f"{exp.get('groundedness', 0.0):.2%}")
+
+            with m6:
+                st.metric("Max Similarity", f"{exp.get('max_similarity', 0.0):.2f}")
             
-            # Explainability features
-            st.markdown("**Top Influence Features:**")
-            top_features = exp.get("top_features", [
-                "Semantic Similarity", 
-                "Keyword Matching", 
-                "Document Structure"
-            ])
+            if exp.get("groundedness", 0) < 0.4:
+                st.warning("Low groundedness: The answer may not be strongly supported by retrieved documents.")
 
-            for i, feature in enumerate(top_features, 1):
-                st.write(f"{i}. {feature}")
+            if exp.get("retrieval_depth", 0) == 0:
+                st.error("No supporting documents were retrieved for this answer.")
+
+            st.divider()
+
+            st.markdown("### 🧠 Rationale")
+            st.markdown(exp.get("explanation", "No rationale available."))
+
         else:
-            st.info("Metrics are available for the latest message in the chat.")
+            st.info("No explainability metadata available.")
 
-    # ---------------------------------------------------------
-    # VISUALIZATION SECTION (Full width)
-    # ---------------------------------------------------------
+    # ===============================
+    # FULL WIDTH — Pipeline Visualization
+    # ===============================
     st.divider()
     st.subheader("📊 RAG Pipeline Breakdown")
-    
-    # Data based on query reality
-    features = ['Retrieved Context', 'Model Confidence', 'Prompt Alignment', 'History Context']
-    
-    # Dynamic importance weights
-    if st.session_state.last_chunks:
-        importance = [0.45, 0.25, 0.20, 0.10]
+
+    if chunks:
+        importance = [0.5, 0.3, 0.2]
+        labels = ["Retrieved Context", "LLM Generation", "Prompt Conditioning"]
     else:
-        importance = [0.05, 0.40, 0.35, 0.20]
-    
+        importance = [0.2, 0.5, 0.3]
+        labels = ["Retrieved Context", "LLM Generation", "Prompt Conditioning"]
+
     fig = go.Figure(data=[
-        go.Bar(x=features, y=importance, marker_color='#0083B8') # Institutional color
+        go.Bar(x=labels, y=importance)
     ])
-    
+
     fig.update_layout(
-        title="Influence Factors for this Specific Response",
-        xaxis_title="Pipeline Components",
-        yaxis_title="Influence Weight",
-        height=350,
-        margin=dict(l=20, r=20, t=40, b=20)
+        title="Influence Factors for this Response",
+        yaxis_title="Relative Influence",
+        height=350
     )
+
     st.plotly_chart(fig, use_container_width=True)
+
 
 # ============================================================================
 # PAGE: FEEDBACK DASHBOARD
@@ -828,102 +933,228 @@ def page_monitoring():
 # ============================================================================
 
 def page_documentation():
-    """Documentation and team information page."""
-    # Render the main title for the documentation page
+    """Documentation and system architecture overview."""
+
     st.title("📚 Documentation")
-    
+
     tab1, tab2, tab3 = st.tabs(["About", "Technical", "Team"])
-    
+
+    # ==========================================================
+    # TAB 1 — ABOUT
+    # ==========================================================
     with tab1:
         st.markdown("""
         ## About This Application
         
-        The **Trustworthy RAG Assistant** is a specialized interface for consulting 
-        official SGC (Quality Management System) procedures. It ensures that 
-        academic staff receive answers strictly grounded in institutional documentation.
+        The **Trustworthy RAG Assistant** is a production-oriented Retrieval-Augmented 
+        Generation (RAG) system designed to consult official SGC (Quality Management System) procedures.
         
-        ### Features
+        The system ensures that responses are strictly grounded in institutional documentation, 
+        minimizing hallucinations and maximizing transparency.
         
-        - **Interactive Chat**: Conversational AI with responses grounded in PDF procedures.
-        - **Explainability**: Real-time analysis of retrieval rationale and confidence.
-        - **Feedback System**: User rating and comments to support continuous auditing.
-        - **Source Transparency**: Detailed view of the specific PDF chunks used as context.
-        - **Hybrid Retrieval**: Combines semantic embeddings with document-code matching.
+        ---
+        ### Key Features
         
+        - **Grounded Conversational AI**
+        - **Multilingual Responses**
+        - **Explainability Dashboard**
+        - **Similarity & Groundedness Metrics**
+        - **System Monitoring**
+        - **Hybrid Retrieval Strategy**
+        
+        ---
+        ### 🌎 Multilingual Capability
+        
+        The system supports multilingual interaction:
+        
+        - User questions are translated to Spanish for optimized retrieval.
+        - Retrieval operates on official Spanish SGC documentation.
+        - The final response is generated in the SAME language as the user’s original question.
+        
+        This ensures:
+        - Retrieval accuracy (Spanish knowledge base)
+        - User-friendly interaction (English or Spanish output)
+        - Strict grounding in official documentation
+        
+        ---
+        ### Three Pillars Alignment
+        
+        This system follows the **Three Pillars of Trustworthy RAG**:
+        
+        - **Pillar I — Retrieval Quality**  
+          Measured using cosine similarity and groundedness scores.
+        
+        - **Pillar II — Controlled Generation**  
+          The LLM is strictly constrained to retrieved document context.
+        
+        - **Pillar III — Monitoring & Observability**  
+          System latency and interaction metrics are tracked in real time.
+        
+        ---
         ### How to Use
         
-        1. **Chat**: Ask questions about procedures (e.g., "How to process a P- procedure?").
-        2. **Review**: Open the "Explainability" tab to see the confidence and source chunks.
-        3. **Feedback**: Rate the response accuracy to help refine the system.
-        4. **Analyze**: Explore the Monitoring page to track interaction quality.
-        5. **Verify**: Use the provided source names to cross-reference with official PDFs.
+        1. Ask a procedural question in English or Spanish.
+        2. Review explainability metrics and retrieved fragments.
+        3. Monitor system performance via the Monitoring page.
+        4. Provide feedback for auditing purposes.
         """)
-    
+
+    # ==========================================================
+    # TAB 2 — TECHNICAL
+    # ==========================================================
     with tab2:
         st.markdown("""
         ## Technical Documentation
         
-        ### Architecture
+        ---
+        ### System Architecture
         
         ```
-        Pipeline: Load PDF → Chunk (250 words) → Embed → Retrieve → Generate
-        LLM: Llama-3.1-8b-instant (via Groq)
-        Embeddings: Sentence-Transformers (all-MiniLM-L6-v2)
-        Similarity: Scikit-learn (Cosine Similarity)
+        User Question
+            ↓
+        Language Detection
+            ↓
+        Translate (for retrieval optimization)
+            ↓
+        Semantic Retrieval (Top-K)
+            ↓
+        Groundedness Calculation
+            ↓
+        Prompt Construction
+            ↓
+        LLM Generation (Language Preserved)
+            ↓
+        Explainability + Monitoring
         ```
         
-        ### Hybrid Retrieval Strategy
+        ---
+        ### Modular Design
         
-        This system implements a custom retrieval logic in `utils/rag.py`:
-        - **Semantic Search**: Uses `all-MiniLM-L6-v2` to find contextually relevant chunks.
-        - **Document-Code Matching**: Specifically boosts fragments containing patterns: `P-`, `F-`, `IT-`, and `D-`.
-        - **Source Diversity**: Prioritizes unique PDF sources to provide a broader context for the LLM.
-        
-        ### State Management
-        
-        Using `st.session_state`, the app persists:
-        - Chat history and retrieval results.
-        - Knowledge base (QMS chunks and embeddings).
-        - Performance and feedback metrics.
-        
-        ### Deployment & Security
-        
-        - **Repository**: [github.com/danielhernandez-utt/qms-rag-dashboard](https://github.com/danielhernandez-utt/qms-rag-dashboard)
-        - **Hosting**: Streamlit Community Cloud.
-        - **Secrets**: API keys managed via Streamlit Secrets (GROQ_API_KEY).
-        
-        ### Requirements
+        The system follows separation of concerns using independent modules.
         
         ```
-        streamlit
-        groq
-        pypdf
-        sentence-transformers
-        scikit-learn
-        pandas
-        plotly
+        app.py
+            ├── page_chat()
+            ├── page_explainability()
+            ├── page_monitoring()
+            └── page_documentation()
+        
+        utils/
+            ├── rag.py
+            ├── qa_pipeline.py
+            └── explainability.py
         ```
+        
+        ---
+        ### utils/rag.py
+        
+        Handles retrieval logic:
+        
+        - Embedding comparison
+        - Cosine similarity computation
+        - Threshold filtering
+        - Top-K chunk selection
+        
+        Returns:
+        - Retrieved chunks
+        - Similarity scores
+        
+        ---
+        ### utils/qa_pipeline.py
+        
+        Central orchestration module.
+        
+        Responsibilities:
+        
+        - Detect user language
+        - Translate question for retrieval
+        - Call semantic retrieval
+        - Compute:
+            - Max Similarity
+            - Average Similarity
+            - Groundedness (Top-3 average)
+        - Build strict auditor prompt
+        - Force response language to match user
+        - Call Groq LLM
+        - Return metadata and usage
+        
+        ---
+        ### utils/explainability.py
+        
+        Dedicated explainability layer.
+        
+        Includes:
+        
+        - `explain_similarity()`  
+          Interprets semantic similarity relationships.
+        
+        - `similarity_predict()`  
+          Provides structured similarity reasoning.
+        
+        Purpose:
+        - Improve transparency
+        - Separate evaluation logic from retrieval logic
+        - Support audit-ready analysis
+        
+        ---
+        ### Explainability Metrics
+        
+        Each response tracks:
+        
+        - Groundedness score
+        - Max similarity
+        - Average similarity
+        - Retrieved chunk count
+        - Confidence estimation
+        - Response time
+        
+        ---
+        ### Monitoring (Production-Oriented)
+        
+        The Monitoring page tracks:
+        
+        - Average Response Time (seconds)
+        - Total system interactions
+        
+        This aligns with Pillar III:
+        Observability and performance stability.
+        
+        ---
+        ### Technical Stack
+        
+        - **LLM**: Llama-3.1-8b-instant (Groq API)
+        - **Embeddings**: all-MiniLM-L6-v2
+        - **Similarity**: Scikit-learn (Cosine Similarity)
+        - **Frontend**: Streamlit
+        - **Visualization**: Plotly
+        - **State Management**: st.session_state
+        
+        ---
+        ### Deterministic Design
+        
+        - Temperature = 0.0
+        - Strict context-bound prompt
+        - No external knowledge allowed
+        - Transparent source inspection
         """)
-    
+
+    # ==========================================================
+    # TAB 3 — TEAM
+    # ==========================================================
     with tab3:
         st.markdown("""
         ## Team Information
         
-        **Team Members**:
-        - **Daniel Alejandro Hernandez Castro**: Streamlit architect
-        - **Emer Ignacio Bernal**: Gradio developer
-        - **Iliana Marlen Meza Sánchez**: Backend integrator
-        - **Víctor Daniel Ortiz García**: Deployment specialist
-        
-        **Module**: 16 - Trustworthy AI
+        **Module**: 17 - Production Monitoring in Trustworthy AI  
         **Project**: Trustworthy RAG Assistant
         
-        ### Team Contributions
+        ---
+        ### Team Members
         
-        - **Gradio Prototype**: Emer Ignacio Bernal
-        - **Streamlit Dashboard**: Daniel Alejandro Hernandez Castro
-        - **Explainability Integration**: Iliana Marlen Meza Sánchez
-        - **Deployment**: Víctor Daniel Ortiz García
+        - **Daniel Alejandro Hernandez Castro** — Streamlit Architecture & Monitoring Integration
+        - **Emer Ignacio Bernal** — Gradio Prototype Development
+        - **Iliana Marlen Meza Sánchez** — Explainability Integration
+        - **Víctor Daniel Ortiz García** — Deployment & Infrastructure
         
         ### Contact
         
@@ -932,8 +1163,21 @@ def page_documentation():
         - **Iliana Meza**: iliana.meza@tectijuana.edu.mx
         - **Víctor Ortiz**: victordortizg@gmail.com
         
-        **Live App**: [Streamlit Cloud](https://qms-rag-dashboard-w5xmdfrwxwxmqeyrnxhvyk.streamlit.app/)
+        **Live App**: [Streamlit Cloud](https://qms-rag-dashboard-w5xmdfrwxwxmqeyrnxhvyk.streamlit.app/)            
+        ---
+        ### Contribution Highlights
+        
+        - Modular RAG pipeline implementation
+        - Hybrid retrieval strategy
+        - Multilingual response enforcement
+        - Groundedness and similarity scoring
+        - Production monitoring dashboard
+        - Secure deployment
+        
+        ---
+        © 2026 Trustworthy AI Module Project - 
         """)
+
           
 
 # ============================================================================

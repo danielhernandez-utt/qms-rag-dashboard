@@ -1,12 +1,11 @@
-# Module 15: Trustworthy AI Explainer Dashboard
-# Requirements for both Gradio and Streamlit applications
+# Module 17: Trustworthy AI Explainer Dashboard
+# Requirements for Streamlit application
 
-streamlit
-groq
-pypdf
-sentence-transformers
-scikit-learn
-pandas
-plotly
-numpy
-
+streamlit>=1.32.0
+groq>=0.5.0
+pypdf>=5.0.0
+sentence-transformers>=3.0.0
+scikit-learn>=1.4.0
+pandas>=2.2.0
+numpy>=1.26.0
+plotly>=5.18.0

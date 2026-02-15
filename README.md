@@ -1,10 +1,20 @@
+---
+title: Trustworthy AI SGC Assistant
+emoji: 🤖
+colorFrom: blue
+colorTo: green
+sdk: streamlit
+app_file: app.py
+pinned: false
+license: mit
+---
 
-# Module 15: Trustworthy AI Explainer Dashboard  
-## Team Project – App Prototyping with Streamlit  
+# Module 17: Trustworthy AI Production Monitoring Dashboard  
+## Team Project – Multilingual RAG System with Explainability  
 
-This project presents a **Trustworthy AI Assistant for a Quality Management System (SGC)** using **Retrieval-Augmented Generation (RAG)**.  
+This project presents a **Trustworthy AI Assistant for a Quality Management System (SGC)** using a **production-oriented Retrieval-Augmented Generation (RAG)** architecture.
 
-The assistant helps teachers consult official institutional procedures, grounding every answer in real PDF documents while providing transparency, explainability, and user feedback through both **Streamlit** and **Gradio** interfaces.
+The assistant helps teachers consult official institutional procedures, grounding every answer strictly in real PDF documents while providing transparency, explainability, monitoring, and multilingual support through a Streamlit dashboard.
 
 ---
 
@@ -12,27 +22,47 @@ The assistant helps teachers consult official institutional procedures, groundin
 
 The system supports professors who need to understand and correctly follow institutional procedures by:
 
-- Answering questions **only from official SGC documents**  
-- Automatically retrieving relevant sections from PDF procedures  
-- Displaying consulted sources for transparency  
-- Explaining how answers were generated  
-- Collecting user feedback on each response  
+- Answering questions **only from official SGC documents**
+- Automatically retrieving relevant sections from PDF procedures
+- Responding in the SAME language as the user (English or Spanish)
+- Displaying consulted sources for transparency
+- Showing similarity and groundedness metrics
+- Monitoring system latency in real time
+- Collecting user feedback on each response
 
 The system works with **all procedures stored in the `SGC/` folder simultaneously (multi-procedure RAG).**
 
 ---
 
+## 🌍 Multilingual Design  
+
+1. User asks a question in English or Spanish.
+2. The question is translated to Spanish for optimized retrieval.
+3. Retrieval operates on official Spanish SGC documentation.
+4. The final answer is generated in the SAME language as the original question.
+
+This ensures:
+
+- Accurate retrieval
+- User-friendly interaction
+- Strict contextual grounding
+
+---
+
 ## 📁 Project Structure  
 
-module-15/project/
-├── module-15-project.md # Project specification
-├── module-15-project-template.ipynb # Learning notebook with examples
-├── gradio_app_template.py # Customized Gradio prototype (RAG-ready)
-├── streamlit_app_template.py # Customized Streamlit dashboard (RAG-based)
-├── requirements.txt # Python dependencies
+qms-rag-dashboard/
+│
+├── streamlit_app_template.py
+├── requirements.txt
+├── README.md
+│
 ├── utils/
-│ └── rag.py # Multi-PDF RAG implementation
-└── SGC/ # Institutional procedures (PDFs)
+│ ├── rag.py
+│ ├── qa_pipeline.py
+│ └── explainability.py
+│
+└── SGC/
 ├── P-CA-05.pdf
 ├── P-CA-06.pdf
 └── (other procedures...)
@@ -43,140 +73,143 @@ module-15/project/
 ## 🧠 Core Technical Approach  
 
 ### 1️⃣ Document Ingestion (RAG)
-- All PDFs inside `SGC/` are automatically loaded  
-- Text is extracted with **pypdf**  
-- Documents are split into chunks  
-- Each chunk is embedded using: all-MiniLM-L6-v2
 
+- All PDFs inside `SGC/` are automatically loaded
+- Text is extracted using **pypdf**
+- Documents are split into chunks (~250 words)
+- Each chunk is embedded using:
 
-- A single in-memory vector knowledge base is built  
+`all-MiniLM-L6-v2`
+
+- A single in-memory vector knowledge base is built
 
 ---
 
-### 2️⃣ Retrieval  
+### 2️⃣ Retrieval (utils/rag.py)
+
 For each user question:
 
-- The system retrieves the **top-3 most relevant text chunks**  
-- Chunks come from any procedure in the `SGC/` folder  
-- Retrieved sources are shown in expandable panels in Streamlit  
+- The system retrieves the **Top-5 most relevant chunks**
+- Cosine similarity is computed
+- Threshold filtering removes weak matches
+- Retrieved chunks are shown in the Explainability page
+
+Metrics calculated:
+
+- Max Similarity
+- Average Similarity
+- Groundedness (Top-3 similarity average)
 
 ---
 
-### 3️⃣ Generation (LLM with Grounding)
+### 3️⃣ Generation (utils/qa_pipeline.py)
 
-- Retrieved context is injected into a structured system prompt  
-- The model is restricted to answer **ONLY using retrieved procedure text**  
-- Backend model: llama-3.1-8b-instant (Groq)
-
-
----
-
-### 4️⃣ Explainability  
-
-The system provides a transparency summary including:
-
-- Input length  
-- Output length  
-- RAG rationale (how retrieval guided the answer)  
-- Statement that no external knowledge was used  
+- Detects user language
+- Translates question for retrieval optimization
+- Builds strict auditor prompt
+- Injects retrieved context
+- Forces response language to match original user input
+- Calls LLM: `llama-3.1-8b-instant` (Groq API)
+- Temperature set to `0.0` for deterministic output
 
 ---
 
-### 5️⃣ Human-in-the-Loop Feedback  
+### 4️⃣ Explainability (utils/explainability.py)
 
-Users can:
+Includes:
 
-- Rate answers as 👍 Helpful or 👎 Not Helpful  
-- Add optional comments  
-- Feedback is stored in session state for analysis  
+- `explain_similarity()`
+- `similarity_predict()`
+
+Provides:
+
+- Retrieved fragments display
+- Similarity metrics
+- Groundedness score
+- Confidence estimation
+- RAG influence visualization
+
+Ensures transparency and audit-readiness.
+
+---
+
+### 5️⃣ Monitoring (Pillar III – Production Focus)
+
+The Monitoring page tracks:
+
+- Average Response Time (seconds)
+- Total interactions
+
+This aligns with production AI observability standards.
+
+---
+
+## 🧩 Trustworthy AI Principles in the System  
+
+| Principle        | Implementation |
+|------------------|---------------|
+| Groundedness     | Answers restricted to retrieved chunks |
+| Transparency     | Sources displayed to user |
+| Explainability   | Similarity & groundedness metrics shown |
+| Accountability   | Feedback mechanism included |
+| Reliability      | Multi-document retrieval |
+| Monitoring       | Average response time tracking |
+| Human oversight  | Teachers can verify document sources |
 
 ---
 
 ## 🚀 How to Run the Project  
 
-### Activate virtual environment  
+### 1️⃣ Clone Repository  
 
 ```bash
-cd M15
-venv310\Scripts\activate
-
-Run Streamlit Dashboard
-streamlit run streamlit_app_template.py
-
-
+git clone https://github.com/danielhernandez-utt/qms-rag-dashboard/
+cd qms-rag-dashboard
+2️⃣ Install Dependencies
+pip install -r requirements.txt
+3️⃣ Run Streamlit App
+streamlit run app.py
 Opens at:
 
 http://localhost:8501
+🌐 Deployment
+Live App:
+https://qms-rag-dashboard-w5xmdfrwxwxmqeyrnxhvyk.streamlit.app/
 
-Run Gradio Prototype
-python gradio_app_template.py
+Repository:
+https://github.com/danielhernandez-utt/qms-rag-dashboard/
 
+⚠️ Limitations
+Embeddings stored in memory (no persistent vector database)
 
-Opens at:
+Feedback not stored externally
 
-http://localhost:7860
-
-**🧩 Trustworthy AI Principles in the System**
-
-Pinciple	Implementation
-Groundedness	Answers restricted to retrieved chunks
-Transparency	Sources displayed to user
-Explainability	RAG rationale shown
-Accountability	Feedback mechanism included
-Reliability	Multi-document retrieval
-Human oversight	Teacher can verify sources
-
-**Limitations**
-
-Embeddings are stored in memory (not a persistent database)
-
-Feedback is not yet saved to an external system
-
-Explainability is descriptive (not full SHAP/LIME visuals)
+Similarity explainability is descriptive (not SHAP/LIME)
 
 Performance depends on PDF text quality
 
+Translation step adds minor latency
 
-**Future Improvements**
-
-Possible extensions:
-
+🔮 Future Improvements
 Persistent vector database (FAISS / Chroma)
 
-True SHAP or LIME visualizations
+Advanced monitoring dashboard
 
-Analytics dashboard for feedback
+Feedback analytics storage
 
-Procedure selector filter
+Role-based access
 
-Export answers to official templates
+PDF version control
 
-User authentication
+Response export to official templates
 
+👥 Team
+Daniel Alejandro Hernandez Castro — Streamlit Architecture & Monitoring
 
-Team Deliverables
+Emer Ignacio Bernal — Gradio Prototype
 
-Submit:
+Iliana Marlen Meza Sánchez — Explainability Integration
 
-TeamName_Module15_Project.ipynb
+Víctor Daniel Ortiz García — Deployment
 
-TeamName_Module15_GradioApp.py
-
-TeamName_Module15_StreamlitApp.py
-
-requirements.txt
-
-README.md ← this file
-
-deployment_urls.txt (if deployed)
-
-
-Resources
-
-Gradio Docs
-
-Streamlit Docs
-
-Groq API
-
-Sentence-Transformers
+© 2026 Trustworthy AI – Module 17 Project
