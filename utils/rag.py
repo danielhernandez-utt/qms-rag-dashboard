@@ -8,6 +8,10 @@ import numpy as np
 # Load embedding model once for global efficiency
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
+
+def get_embedding_model():
+    return embedding_model
+
 def load_pdf_text(pdf_path: str) -> str:
     # Extracts text from PDF using pypdf
     reader = PdfReader(pdf_path)
@@ -65,7 +69,8 @@ def retrieve_relevant_chunks(question: str, knowledge_base: dict, top_k: int = 5
 
     q_emb = embedding_model.encode([question])
     sims = cosine_similarity(q_emb, knowledge_base["embeddings"])[0]
-    
+    #print("DEBUG max similarity:", max(sims))
+
     # NEW: Adjust threshold to allow cross-language matching (0.35 is safer for EN-ES)
     threshold = 0.35 
     
