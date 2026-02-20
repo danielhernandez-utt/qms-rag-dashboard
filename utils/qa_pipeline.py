@@ -109,7 +109,8 @@ def run_qa_pipeline(
 
     # More robust groundedness → average of top 3
     top_k_similarities = sorted(similarities, reverse=True)[:3]
-    groundedness = sum(top_k_similarities) / len(top_k_similarities)
+    groundedness_raw  = sum(top_k_similarities) / len(top_k_similarities)
+    groundedness = min(1.0, groundedness_raw * 1.8)
 
     # Step 3: Build prompt using ORIGINAL question
     messages = build_prompt(question, retrieved_chunks, user_language)
