@@ -714,10 +714,10 @@ def page_explainability():
 
             with m5:
                 st.metric("Groundedness", f"{exp.get('groundedness', 0.0):.2%}")
-
+                st.metric("Response Time", f"{exp.get('response_time', 0.0):.2}")
             with m6:
                 st.metric("Max Similarity", f"{exp.get('max_similarity', 0.0):.2f}")
-            
+                st.metric("Average Similarity", f"{exp.get('avg_similarity', 0.0):.2f}")
             if exp.get("groundedness", 0) < 0.4:
                 st.warning("Low groundedness: The answer may not be strongly supported by retrieved documents.")
 
