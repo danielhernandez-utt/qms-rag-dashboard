@@ -277,6 +277,10 @@ def generate_response(message: str, temperature: float = 0.0) -> tuple:
 
     st.session_state.explanations_history.append(explanation)
     st.session_state.chunks_history.append(retrieved_chunks)
+    print("DEBUG groundedness:", groundedness)
+    print("DEBUG max_similarity:", max_similarity)
+    print("DEBUG retrieval_depth:", retrieval_depth)
+    print("DEBUG final_confidence:", confidence)
 
 
     return response, explanation, response_time
